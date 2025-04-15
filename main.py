@@ -7,12 +7,10 @@ import websockets
 from loguru import logger
 from dotenv import load_dotenv
 from XianyuApis import XianyuApis
-
+from mysql_manager import XianyuMySQLManager
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
-from XianyuAgent import XianyuReplyBot
-from context_manager import ChatContextManager
-
+from XianyuAgent import DifyAgent
 
 class XianyuLive:
     def __init__(self, cookies_str):
@@ -22,7 +20,7 @@ class XianyuLive:
         self.cookies = trans_cookies(cookies_str)
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
-        self.context_manager = ChatContextManager()
+        self.db_manager = XianyuMySQLManager()  # 使用MySQL管理器
         
         # 心跳相关配置
         self.heartbeat_interval = 15  # 心跳间隔15秒
@@ -227,20 +225,22 @@ class XianyuLive:
                 logger.debug(f"原始消息: {message}")
                 return
 
+            print(memoryview)
             # 处理聊天消息
             create_time = int(message["1"]["5"])
             send_user_name = message["1"]["10"]["reminderTitle"]
             send_user_id = message["1"]["10"]["senderUserId"]
             send_message = message["1"]["10"]["reminderContent"]
+            order_id = message["1"]["2"].split('@')[0]  # 获取订单ID
             
             # 时效性验证（过滤5分钟前消息）
             if (time.time() * 1000 - create_time) > 300000:
                 logger.debug("过期消息丢弃")
                 return
                 
-            if send_user_id == self.myid:
-                logger.debug("过滤自身消息")
-                return
+            #if send_user_id == self.myid:
+            #    logger.debug("过滤自身消息")
+            #    return
                 
             url_info = message["1"]["10"]["reminderUrl"]
             item_id = url_info.split("itemId=")[1].split("&")[0] if "itemId=" in url_info else None
@@ -251,30 +251,49 @@ class XianyuLive:
                 
             item_info = self.xianyu.get_item_info(self.cookies, item_id)['data']['itemDO']
             item_description = f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
+            item_image_url = item_info.get('images', [{}])[0].get('url') if item_info.get('images') else None
+            
+            # 保存聊天消息到数据库
+            try:
+                self.db_manager.save_chat_message(
+                    user_id=send_user_id,  # 使用发送者ID
+                    user_name=send_user_name,
+                    local_id=self.myid,  # 使用机器人ID作为local_id
+                    chat=send_message,
+                    url=url_info,  # 保存完整的URL信息
+                    order_id=order_id  # 保存订单ID
+                )
+                logger.info(f"已保存聊天消息到数据库: {send_user_name} - {send_message}")
+            except Exception as e:
+                logger.error(f"保存聊天消息到数据库时发生错误: {str(e)}")
             
             logger.info(f"user: {send_user_name}, 发送消息: {send_message}")
             
             # 添加用户消息到上下文
-            self.context_manager.add_message(send_user_id, item_id, "user", send_message)
+            #self.context_manager.add_message(send_user_id, item_id, "user", send_message)
             
             # 获取完整的对话上下文
-            context = self.context_manager.get_context(send_user_id, item_id)
+            #context = self.context_manager.get_context(send_user_id, item_id)
             
             # 生成回复
-            bot_reply = bot.generate_reply(
-                send_message,
-                item_description,
-                context=context
+            bot_reply = bot.generate(
+                user_msg=send_message,
+                user_id=send_user_id
             )
             
-            # 检查是否为价格意图，如果是则增加议价次数
-            if bot.last_intent == "price":
-                self.context_manager.increment_bargain_count(send_user_id, item_id)
-                bargain_count = self.context_manager.get_bargain_count(send_user_id, item_id)
-                logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
-            
-            # 添加机器人回复到上下文
-            self.context_manager.add_message(send_user_id, item_id, "assistant", bot_reply)
+            # 保存机器人回复到数据库
+            try:
+                self.db_manager.save_chat_message(
+                    user_id=send_user_id,  # 使用发送者ID
+                    user_name="me",  # 机器人名称
+                    local_id=self.myid,  # 使用机器人ID作为local_id
+                    chat=bot_reply,
+                    url=url_info,  # 保存相同的URL信息
+                    order_id=order_id  # 保存相同的订单ID
+                )
+                logger.info(f"已保存机器人回复到数据库: {bot_reply}")
+            except Exception as e:
+                logger.error(f"保存机器人回复到数据库时发生错误: {str(e)}")
             
             logger.info(f"机器人回复: {bot_reply}")
             cid = message["1"]["2"].split('@')[0]
@@ -422,7 +441,7 @@ if __name__ == '__main__':
     #加载环境变量 cookie
     load_dotenv()
     cookies_str = os.getenv("COOKIES_STR")
-    bot = XianyuReplyBot()
+    bot = DifyAgent()
     xianyuLive = XianyuLive(cookies_str)
     # 常驻进程
     asyncio.run(xianyuLive.main())

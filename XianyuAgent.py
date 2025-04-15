@@ -3,7 +3,70 @@ from typing import List, Dict
 import os
 from openai import OpenAI
 from loguru import logger
+import requests
+from dotenv import load_dotenv
 
+# 加载环境变量
+load_dotenv()
+
+class DifyAgent():
+    """Dify API 处理 Agent"""
+    
+    def __init__(self, client=None, system_prompt=None, safety_filter=None):
+        """
+        初始化 Dify Agent
+        
+        Args:
+            client: 为了保持接口一致性而保留，但在 Dify Agent 中不使用
+            system_prompt: 为了保持接口一致性而保留，但在 Dify Agent 中不使用
+            safety_filter: 用于过滤响应的安全过滤函数
+        """
+        self.safety_filter = safety_filter if safety_filter else lambda x: x
+        self.api_key = os.getenv('DIFY_API_KEY')
+        if not self.api_key:
+            raise ValueError("请在.env文件中设置DIFY_API_KEY环境变量")
+    
+    def generate(self, user_msg: str, user_id: str, image_url: str = None) -> str:
+        """重写生成逻辑，使用 Dify API"""
+        url = "https://api.dify.ai/v1/chat-messages"
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # 准备请求数据
+        payload = {
+            "inputs": {},
+            "query": user_msg,
+            "response_mode": "blocking",
+            "conversation_id": "",
+            "user": user_id
+        }
+        
+        # 如果提供了图片URL，添加到请求中
+        if image_url:
+            payload["files"] = [
+                {
+                    "type": "image",
+                    "transfer_method": "remote_url",
+                    "url": image_url
+                }
+            ]
+        
+        try:
+            # 发送POST请求
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                answer = response.json().get('answer', '')
+                return self.safety_filter(answer)
+            else:
+                logger.error(f"Dify API 请求失败: {response.status_code} - {response.text}")
+                return "抱歉，我现在无法回答您的问题，请稍后再试。"
+        except Exception as e:
+            logger.error(f"Dify API 请求异常: {e}")
+            return "抱歉，服务暂时出现问题，请稍后再试。"
 
 class XianyuReplyBot:
     def __init__(self):
@@ -16,14 +79,18 @@ class XianyuReplyBot:
         self._init_agents()
         self.router = IntentRouter(self.agents['classify'])
         self.last_intent = None  # 记录最后一次意图
-
+        # 初始化Dify API
+        self.dify_api_key = os.getenv('DIFY_API_KEY')
+        if not self.dify_api_key:
+            logger.warning("未设置DIFY_API_KEY环境变量，Dify API功能将不可用")
 
     def _init_agents(self):
         """初始化各领域Agent"""
         self.agents = {
-            'classify':ClassifyAgent(self.client, self.classify_prompt, self._safe_filter),
+            'classify': ClassifyAgent(self.client, self.classify_prompt, self._safe_filter),
             'price': PriceAgent(self.client, self.price_prompt, self._safe_filter),
             'tech': TechAgent(self.client, self.tech_prompt, self._safe_filter),
+            'dify': DifyAgent(self.client, self.default_prompt, self._safe_filter),  # 添加 Dify Agent
             'default': DefaultAgent(self.client, self.default_prompt, self._safe_filter),
         }
 
@@ -79,10 +146,7 @@ class XianyuReplyBot:
         # 1. 路由决策
         detected_intent = self.router.detect(user_msg, item_desc, formatted_context)
 
-
-
         # 2. 获取对应Agent
-
         internal_intents = {'classify'}  # 定义不对外开放的Agent
 
         if detected_intent in self.agents and detected_intent not in internal_intents:
@@ -127,6 +191,54 @@ class XianyuReplyBot:
                 except Exception:
                     pass
         return 0
+
+    def generate_reply_with_dify(self, user_msg: str, item_desc: str, context: List[Dict], image_url: str = None) -> str:
+        """使用Dify API生成回复"""
+        if not self.dify_api_key:
+            logger.warning("DIFY_API_KEY未设置，回退到默认回复生成")
+            return self.generate_reply(user_msg, item_desc, context)
+            
+        url = "https://api.dify.ai/v1/chat-messages"
+        
+        headers = {
+            "Authorization": f"Bearer {self.dify_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # 准备请求数据
+        payload = {
+            "inputs": {},
+            "query": user_msg,
+            "response_mode": "blocking",
+            "conversation_id": "",
+            "user": "abc-123"
+        }
+        
+        # 如果提供了图片URL，添加到请求中
+        if image_url:
+            payload["files"] = [
+                {
+                    "type": "image",
+                    "transfer_method": "remote_url",
+                    "url": image_url
+                }
+            ]
+        
+        # 发送POST请求
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                answer = response.json().get('answer', '')
+                return self._safe_filter(answer)
+            else:
+                logger.error(f"Dify API 请求失败: {response.status_code} - {response.text}")
+                # 如果Dify API失败，回退到默认回复生成
+                return self.generate_reply(user_msg, item_desc, context)
+        except Exception as e:
+            logger.error(f"Dify API 请求异常: {e}")
+            # 如果发生异常，回退到默认回复生成
+            return self.generate_reply(user_msg, item_desc, context)
 
     def reload_prompts(self):
         """重新加载所有提示词"""
