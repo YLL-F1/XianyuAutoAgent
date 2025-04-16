@@ -3,6 +3,7 @@ import time
 from loguru import logger
 from dotenv import load_dotenv
 import os
+import random
 
 class XianyuMySQLManager:
     def __init__(self):
@@ -33,9 +34,14 @@ class XianyuMySQLManager:
             self._create_tables()
             self._update_tables_charset()  # 更新现有表的字符集
             logger.info(f"成功连接到MySQL数据库: {host}:{port}")
-        except mysql.connector.Error as err:
-            logger.error(f"连接MySQL数据库失败: {err}")
+        except Exception as e:
+            logger.error(f"连接MySQL数据库失败: {str(e)}")
             raise
+        
+    def _random_delay(self):
+        """随机延迟0.5-1.5秒"""
+        delay = random.uniform(0.5, 1.5)
+        time.sleep(delay)
         
     def _create_tables(self):
         """创建数据库表"""
@@ -110,6 +116,9 @@ class XianyuMySQLManager:
     def save_chat_message(self, user_id, user_name, local_id, chat, url=None, order_id=None):
         """保存聊天消息"""
         try:
+            # 添加随机延迟
+            self._random_delay()
+            
             # 确保所有文本字段使用UTF-8编码
             if user_name:
                 user_name = user_name.encode('utf-8').decode('utf-8')
@@ -139,6 +148,9 @@ class XianyuMySQLManager:
             user_url: 用户URL，可选
         """
         try:
+            # 添加随机延迟
+            self._random_delay()
+            
             current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.cursor.execute('''
                 INSERT INTO order_message (order_id, message, time, user_url)
@@ -157,6 +169,9 @@ class XianyuMySQLManager:
             status: 订单状态
         """
         try:
+            # 添加随机延迟
+            self._random_delay()
+            
             current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             
             # 检查订单ID是否存在
