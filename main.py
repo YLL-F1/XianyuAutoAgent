@@ -4,6 +4,9 @@ import asyncio
 import time
 import os
 import websockets
+import redis
+import threading
+import ssl
 from loguru import logger
 from dotenv import load_dotenv
 from XianyuApis import XianyuApis
@@ -21,6 +24,20 @@ class XianyuLive:
         self.device_id = generate_device_id(self.myid)
         self.db_manager = XianyuMySQLManager()  # 使用MySQL管理器
         
+        # Redis配置
+        self.redis_client = redis.Redis(
+            host='localhost',
+            port=6379,
+            db=0,
+            decode_responses=True
+        )
+        self.message_queue_key = 'xianyu:messages'
+        self.processing_queue_key = 'xianyu:processing'
+        
+        # 线程相关配置
+        self.max_workers = 10  # 最大工作线程数
+        self.worker_threads = []
+        self.stop_event = threading.Event()
         
         # 心跳相关配置
         self.heartbeat_interval = 15  # 心跳间隔15秒
@@ -30,124 +47,79 @@ class XianyuLive:
         self.heartbeat_task = None
         self.ws = None
 
-    async def send_msg(self, ws, cid, toid, text):
-        text = {
-            "contentType": 1,
-            "text": {
-                "text": text
-            }
-        }
-        text_base64 = str(base64.b64encode(json.dumps(text).encode('utf-8')), 'utf-8')
-        msg = {
-            "lwp": "/r/MessageSend/sendByReceiverScope",
-            "headers": {
-                "mid": generate_mid()
-            },
-            "body": [
-                {
-                    "uuid": generate_uuid(),
-                    "cid": f"{cid}@goofish",
-                    "conversationType": 1,
-                    "content": {
-                        "contentType": 101,
-                        "custom": {
-                            "type": 1,
-                            "data": text_base64
-                        }
-                    },
-                    "redPointPolicy": 0,
-                    "extension": {
-                        "extJson": "{}"
-                    },
-                    "ctx": {
-                        "appVersion": "1.0",
-                        "platform": "web"
-                    },
-                    "mtags": {},
-                    "msgReadStatusSetting": 1
-                },
-                {
-                    "actualReceivers": [
-                        f"{toid}@goofish",
-                        f"{self.myid}@goofish"
-                    ]
-                }
-            ]
-        }
-        await ws.send(json.dumps(msg))
-
-    async def init(self, ws):
-        token = self.xianyu.get_token(self.cookies, self.device_id)['data']['accessToken']
-        msg = {
-            "lwp": "/reg",
-            "headers": {
-                "cache-header": "app-key token ua wv",
-                "app-key": "444e9908a51d1cb236a27862abc769c9",
-                "token": token,
-                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
-                "dt": "j",
-                "wv": "im:3,au:3,sy:6",
-                "sync": "0,0;0;0;",
-                "did": self.device_id,
-                "mid": generate_mid()
-            }
-        }
-        await ws.send(json.dumps(msg))
-        # 等待一段时间，确保连接注册完成
-        await asyncio.sleep(1)
-        msg = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "5701741704675979 0"}, "body": [
-            {"pipeline": "sync", "tooLong2Tag": "PNM,1", "channel": "sync", "topic": "sync", "highPts": 0,
-             "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
-        await ws.send(json.dumps(msg))
-        logger.info('连接注册完成')
-
-    def is_chat_message(self, message):
-        """判断是否为用户聊天消息"""
-        try:
-            return (
-                isinstance(message, dict) 
-                and "1" in message 
-                and isinstance(message["1"], dict)  # 确保是字典类型
-                and "10" in message["1"]
-                and isinstance(message["1"]["10"], dict)  # 确保是字典类型
-                and "reminderContent" in message["1"]["10"]
+    def start_workers(self):
+        """启动工作线程"""
+        for i in range(self.max_workers):
+            thread = threading.Thread(
+                target=self.message_worker,
+                name=f'MessageWorker-{i}',
+                daemon=True
             )
-        except Exception:
-            return False
+            thread.start()
+            self.worker_threads.append(thread)
+        logger.info(f"已启动 {self.max_workers} 个工作线程")
 
-    def is_sync_package(self, message_data):
-        """判断是否为同步包消息"""
-        try:
-            return (
-                isinstance(message_data, dict)
-                and "body" in message_data
-                and "syncPushPackage" in message_data["body"]
-                and "data" in message_data["body"]["syncPushPackage"]
-                and len(message_data["body"]["syncPushPackage"]["data"]) > 0
-            )
-        except Exception:
-            return False
+    def stop_workers(self):
+        """停止工作线程"""
+        self.stop_event.set()
+        for thread in self.worker_threads:
+            thread.join(timeout=5)
+        self.worker_threads.clear()
+        self.stop_event.clear()
+        logger.info("所有工作线程已停止")
 
-    def is_typing_status(self, message):
-        """判断是否为用户正在输入状态消息"""
-        try:
-            return (
-                isinstance(message, dict)
-                and "1" in message
-                and isinstance(message["1"], list)
-                and len(message["1"]) > 0
-                and isinstance(message["1"][0], dict)
-                and "1" in message["1"][0]
-                and isinstance(message["1"][0]["1"], str)
-                and "@goofish" in message["1"][0]["1"]
-            )
-        except Exception:
-            return False
+    def message_worker(self):
+        """消息处理工作线程"""
+        while not self.stop_event.is_set():
+            try:
+                # 从Redis队列中获取消息
+                message_data = self.redis_client.brpoplpush(
+                    self.message_queue_key,
+                    self.processing_queue_key,
+                    timeout=1
+                )
+                
+                if not message_data:
+                    continue
+                
+                try:
+                    # 解析消息数据
+                    data = json.loads(message_data)
+                    message = data['message']
+                    websocket = self.ws  # 使用当前的WebSocket连接
+                    
+                    # 处理消息
+                    asyncio.run(self._handle_message(message, websocket))
+                    
+                    # 处理完成后从处理队列中移除
+                    self.redis_client.lrem(self.processing_queue_key, 0, message_data)
+                    
+                except Exception as e:
+                    logger.error(f"处理消息时发生错误: {str(e)}")
+                    # 将处理失败的消息移回主队列
+                    self.redis_client.lpush(self.message_queue_key, message_data)
+                    self.redis_client.lrem(self.processing_queue_key, 0, message_data)
+                    
+            except Exception as e:
+                logger.error(f"工作线程发生错误: {str(e)}")
+                time.sleep(1)  # 发生错误时等待1秒后继续
 
     async def handle_message(self, message_data, websocket):
-        """处理所有类型的消息"""
+        """将消息放入Redis队列"""
         try:
+            # 将消息数据序列化并放入Redis队列
+            data = {
+                'message': message_data,
+                'timestamp': time.time()
+            }
+            self.redis_client.lpush(self.message_queue_key, json.dumps(data))
+            logger.debug("消息已放入Redis队列")
+        except Exception as e:
+            logger.error(f"将消息放入Redis队列时发生错误: {str(e)}")
 
+    async def _handle_message(self, message_data, websocket):
+        """实际处理消息的方法"""
+        try:
             try:
                 message = message_data
                 ack = {
@@ -342,6 +314,120 @@ class XianyuLive:
             logger.error(f"处理消息时发生错误: {str(e)}")
             logger.debug(f"原始消息: {message_data}")
 
+    async def send_msg(self, ws, cid, toid, text):
+        text = {
+            "contentType": 1,
+            "text": {
+                "text": text
+            }
+        }
+        text_base64 = str(base64.b64encode(json.dumps(text).encode('utf-8')), 'utf-8')
+        msg = {
+            "lwp": "/r/MessageSend/sendByReceiverScope",
+            "headers": {
+                "mid": generate_mid()
+            },
+            "body": [
+                {
+                    "uuid": generate_uuid(),
+                    "cid": f"{cid}@goofish",
+                    "conversationType": 1,
+                    "content": {
+                        "contentType": 101,
+                        "custom": {
+                            "type": 1,
+                            "data": text_base64
+                        }
+                    },
+                    "redPointPolicy": 0,
+                    "extension": {
+                        "extJson": "{}"
+                    },
+                    "ctx": {
+                        "appVersion": "1.0",
+                        "platform": "web"
+                    },
+                    "mtags": {},
+                    "msgReadStatusSetting": 1
+                },
+                {
+                    "actualReceivers": [
+                        f"{toid}@goofish",
+                        f"{self.myid}@goofish"
+                    ]
+                }
+            ]
+        }
+        await ws.send(json.dumps(msg))
+
+    async def init(self, ws):
+        token = self.xianyu.get_token(self.cookies, self.device_id)['data']['accessToken']
+        msg = {
+            "lwp": "/reg",
+            "headers": {
+                "cache-header": "app-key token ua wv",
+                "app-key": "444e9908a51d1cb236a27862abc769c9",
+                "token": token,
+                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
+                "dt": "j",
+                "wv": "im:3,au:3,sy:6",
+                "sync": "0,0;0;0;",
+                "did": self.device_id,
+                "mid": generate_mid()
+            }
+        }
+        await ws.send(json.dumps(msg))
+        # 等待一段时间，确保连接注册完成
+        await asyncio.sleep(1)
+        msg = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "5701741704675979 0"}, "body": [
+            {"pipeline": "sync", "tooLong2Tag": "PNM,1", "channel": "sync", "topic": "sync", "highPts": 0,
+             "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
+        await ws.send(json.dumps(msg))
+        logger.info('连接注册完成')
+
+    def is_chat_message(self, message):
+        """判断是否为用户聊天消息"""
+        try:
+            return (
+                isinstance(message, dict) 
+                and "1" in message 
+                and isinstance(message["1"], dict)  # 确保是字典类型
+                and "10" in message["1"]
+                and isinstance(message["1"]["10"], dict)  # 确保是字典类型
+                and "reminderContent" in message["1"]["10"]
+            )
+        except Exception:
+            return False
+
+    def is_sync_package(self, message_data):
+        """判断是否为同步包消息"""
+        try:
+            return (
+                isinstance(message_data, dict)
+                and "body" in message_data
+                and "syncPushPackage" in message_data["body"]
+                and "data" in message_data["body"]["syncPushPackage"]
+                and len(message_data["body"]["syncPushPackage"]["data"]) > 0
+            )
+        except Exception:
+            return False
+
+    def is_typing_status(self, message):
+        """判断是否为用户正在输入状态消息"""
+        try:
+            return (
+                isinstance(message, dict)
+                and "1" in message
+                and isinstance(message["1"], list)
+                and len(message["1"]) > 0
+                and isinstance(message["1"][0], dict)
+                and "1" in message["1"][0]
+                and isinstance(message["1"][0]["1"], str)
+                and "@goofish" in message["1"][0]["1"]
+            )
+        except Exception:
+            return False
+
     async def send_heartbeat(self, ws):
         """发送心跳包并等待响应"""
         try:
@@ -397,87 +483,160 @@ class XianyuLive:
             logger.error(f"处理心跳响应出错: {e}")
         return False
 
-    
+    async def connect(self):
+        """建立WebSocket连接"""
+        try:
+            # 添加SSL上下文配置
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # 添加连接超时和重试逻辑
+            for attempt in range(3):  # 最多重试3次
+                try:
+                    self.ws = await websockets.connect(
+                        self.base_url,
+                        ssl=ssl_context,
+                        ping_interval=20,  # 每20秒发送一次ping
+                        ping_timeout=10,   # ping超时时间为10秒
+                        close_timeout=5,   # 关闭超时时间为5秒
+                        max_size=2**20     # 最大消息大小为1MB
+                    )
+                    logger.info("WebSocket连接成功")
+                    return
+                except (websockets.exceptions.InvalidStatusCode,
+                       websockets.exceptions.InvalidHandshake,
+                       websockets.exceptions.InvalidMessage,
+                       websockets.exceptions.ConnectionClosed,
+                       ssl.SSLError,
+                       OSError) as e:
+                    if attempt < 2:  # 如果不是最后一次尝试
+                        wait_time = (attempt + 1) * 5  # 递增等待时间
+                        logger.warning(f"WebSocket连接失败，{wait_time}秒后重试: {str(e)}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+        except Exception as e:
+            logger.error(f"WebSocket连接失败: {str(e)}")
+            raise
+
+    async def handle_message(self, message):
+        """处理接收到的消息"""
+        try:
+            # 将消息放入Redis队列
+            message_data = {
+                'message': message,
+                'timestamp': time.time()
+            }
+            self.redis_client.rpush(self.message_queue_key, json.dumps(message_data))
+            logger.debug(f"消息已加入队列: {message}")
+        except Exception as e:
+            logger.error(f"处理消息时发生错误: {str(e)}")
+            # 如果Redis操作失败，尝试重新连接
+            try:
+                self.redis_client = redis.Redis(
+                    host='localhost',
+                    port=6379,
+                    db=0,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    retry_on_timeout=True
+                )
+                # 重试一次
+                self.redis_client.rpush(self.message_queue_key, json.dumps(message_data))
+            except Exception as retry_error:
+                logger.error(f"重试Redis操作失败: {str(retry_error)}")
 
     async def main(self):
-        while True:
-            try:
-                headers = {
-                    "Cookie": self.cookies_str,
-                    "Host": "wss-goofish.dingtalk.com",
-                    "Connection": "Upgrade",
-                    "Pragma": "no-cache",
-                    "Cache-Control": "no-cache",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                    "Origin": "https://www.goofish.com",
-                    "Accept-Encoding": "gzip, deflate, br, zstd",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                }
+        """主函数"""
+        try:
+            # 启动工作线程
+            self.start_workers()
+            
+            while True:
+                try:
+                    # 建立WebSocket连接
+                    headers = {
+                        "Cookie": self.cookies_str,
+                        "Host": "wss-goofish.dingtalk.com",
+                        "Connection": "Upgrade",
+                        "Pragma": "no-cache",
+                        "Cache-Control": "no-cache",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                        "Origin": "https://www.goofish.com",
+                        "Accept-Encoding": "gzip, deflate, br, zstd",
+                        "Accept-Language": "zh-CN,zh;q=0.9",
+                    }
 
-                async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
-                    self.ws = websocket
-                    await self.init(websocket)
-                    
-                    # 初始化心跳时间
-                    self.last_heartbeat_time = time.time()
-                    self.last_heartbeat_response = time.time()
-                    
-                    # 启动心跳任务
-                    self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
-                    
-                    
-                    async for message in websocket:
-                        try:
-                            message_data = json.loads(message)
-                            
-                            # 处理心跳响应
-                            if await self.handle_heartbeat_response(message_data):
-                                continue
-                            
-                            # 发送通用ACK响应
-                            if "headers" in message_data and "mid" in message_data["headers"]:
-                                ack = {
-                                    "code": 200,
-                                    "headers": {
-                                        "mid": message_data["headers"]["mid"],
-                                        "sid": message_data["headers"].get("sid", "")
+                    async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
+                        self.ws = websocket
+                        await self.init(websocket)
+                        
+                        # 初始化心跳时间
+                        self.last_heartbeat_time = time.time()
+                        self.last_heartbeat_response = time.time()
+                        
+                        # 启动心跳任务
+                        self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
+                        
+                        async for message in websocket:
+                            try:
+                                message_data = json.loads(message)
+                                
+                                # 处理心跳响应
+                                if await self.handle_heartbeat_response(message_data):
+                                    continue
+                                
+                                # 发送通用ACK响应
+                                if "headers" in message_data and "mid" in message_data["headers"]:
+                                    ack = {
+                                        "code": 200,
+                                        "headers": {
+                                            "mid": message_data["headers"]["mid"],
+                                            "sid": message_data["headers"].get("sid", "")
+                                        }
                                     }
-                                }
-                                # 复制其他可能的header字段
-                                for key in ["app-key", "ua", "dt"]:
-                                    if key in message_data["headers"]:
-                                        ack["headers"][key] = message_data["headers"][key]
-                                await websocket.send(json.dumps(ack))
-                            
-                            # 处理其他消息
-                            await self.handle_message(message_data, websocket)
+                                    # 复制其他可能的header字段
+                                    for key in ["app-key", "ua", "dt"]:
+                                        if key in message_data["headers"]:
+                                            ack["headers"][key] = message_data["headers"][key]
+                                    await websocket.send(json.dumps(ack))
+                                
+                                # 将消息放入Redis队列
+                                await self.handle_message(message_data, websocket)
 
-                        except json.JSONDecodeError:
-                            logger.error("消息解析失败")
-                        except Exception as e:
-                            logger.error(f"处理消息时发生错误: {str(e)}")
-                            logger.debug(f"原始消息: {message}")
+                            except json.JSONDecodeError:
+                                logger.error("消息解析失败")
+                            except Exception as e:
+                                logger.error(f"处理消息时发生错误: {str(e)}")
+                                logger.debug(f"原始消息: {message}")
 
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket连接已关闭")
-                if self.heartbeat_task:
-                    self.heartbeat_task.cancel()
-                    try:
-                        await self.heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
-                await asyncio.sleep(5)  # 等待5秒后重连
-                
-            except Exception as e:
-                logger.error(f"连接发生错误: {e}")
-                if self.heartbeat_task:
-                    self.heartbeat_task.cancel()
-                    try:
-                        await self.heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
-                await asyncio.sleep(5)  # 等待5秒后重连
-
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("WebSocket连接已关闭")
+                    if self.heartbeat_task:
+                        self.heartbeat_task.cancel()
+                        try:
+                            await self.heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
+                    await asyncio.sleep(5)  # 等待5秒后重连
+                except Exception as e:
+                    logger.error(f"连接发生错误: {e}")
+                    if self.heartbeat_task:
+                        self.heartbeat_task.cancel()
+                        try:
+                            await self.heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
+                    await asyncio.sleep(5)  # 等待5秒后重连
+                    
+        except Exception as e:
+            logger.error(f"主循环发生错误: {str(e)}")
+        finally:
+            # 确保在程序退出时停止工作线程
+            self.stop_workers()
+            if hasattr(self, 'ws') and self.ws:
+                await self.ws.close()
 
 if __name__ == '__main__':
     #加载环境变量 cookie
