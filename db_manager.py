@@ -32,7 +32,9 @@ class XianyuDBManager:
                 CREATE TABLE IF NOT EXISTS order_message (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     order_id TEXT NOT NULL,
-                    message TEXT
+                    message TEXT,
+                    time TEXT,
+                    user_url TEXT
                 )
             ''')
             
@@ -41,7 +43,8 @@ class XianyuDBManager:
                 CREATE TABLE IF NOT EXISTS order_status (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     order_id TEXT NOT NULL,
-                    status TEXT
+                    status TEXT,
+                    time TEXT
                 )
             ''')
             
@@ -65,13 +68,19 @@ class XianyuDBManager:
             logger.error(f"保存聊天消息时发生错误: {str(e)}")
             raise
             
-    def save_order_message(self, order_id, message):
-        """保存订单消息"""
+    def save_order_message(self, order_id, message, user_url=None):
+        """保存订单消息
+        Args:
+            order_id: 订单ID
+            message: 消息内容
+            user_url: 用户URL，可选
+        """
         try:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.cursor.execute('''
-                INSERT INTO order_message (order_id, message)
-                VALUES (?, ?)
-            ''', (order_id, message))
+                INSERT INTO order_message (order_id, message, time, user_url)
+                VALUES (?, ?, ?, ?)
+            ''', (order_id, message, current_time, user_url))
             self.conn.commit()
             return self.cursor.lastrowid
         except Exception as e:
@@ -81,10 +90,11 @@ class XianyuDBManager:
     def update_order_status(self, order_id, status):
         """更新订单状态"""
         try:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.cursor.execute('''
-                INSERT INTO order_status (order_id, status)
-                VALUES (?, ?)
-            ''', (order_id, status))
+                INSERT INTO order_status (order_id, status, time)
+                VALUES (?, ?, ?)
+            ''', (order_id, status, current_time))
             self.conn.commit()
             return self.cursor.lastrowid
         except Exception as e:

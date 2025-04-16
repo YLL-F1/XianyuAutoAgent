@@ -8,7 +8,7 @@ from loguru import logger
 from dotenv import load_dotenv
 from XianyuApis import XianyuApis
 from mysql_manager import XianyuMySQLManager
-
+from asyncio import Queue
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from XianyuAgent import DifyAgent
 
@@ -21,6 +21,10 @@ class XianyuLive:
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
         self.db_manager = XianyuMySQLManager()  # 使用MySQL管理器
+        
+        # 消息队列
+        self.message_queue = Queue(maxsize=1000)  # 设置队列最大容量
+        self.processing_tasks = set()  # 用于跟踪正在处理的任务
         
         # 心跳相关配置
         self.heartbeat_interval = 15  # 心跳间隔15秒
@@ -194,26 +198,65 @@ class XianyuLive:
             except Exception as e:
                 logger.error(f"消息解密失败: {e}")
                 return
-
+            print("ddddd",message)
             try:
-                # 判断是否为订单消息,需要自行编写付款后的逻辑
+                # 判断是否为订单消息
                 if message['3']['redReminder'] == '等待买家付款':
-                    user_id = message['1'].split('@')[0]
+                    user_id = message['1'].split('@')[0]  # 使用user_id作为order_id
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
+                    
+                    # 创建初始订单状态
+                    self.db_manager.update_order_status(user_id, '等待买家付款')
+                    logger.info(f"订单状态已更新: {user_id} -> 等待买家付款")
+                    
+                    # 保存订单消息
+                    self.db_manager.save_order_message(
+                        order_id=user_id,  # 使用user_id作为order_id
+                        message='订单创建，等待买家付款',
+                        user_url=user_url
+                    )
+                    logger.info(f"订单消息已保存: {user_id} -> 订单创建，等待买家付款")
                     logger.info(f'等待买家 {user_url} 付款')
                     return
+                    
                 elif message['3']['redReminder'] == '交易关闭':
-                    user_id = message['1'].split('@')[0]
+                    user_id = message['1'].split('@')[0]  # 使用user_id作为order_id
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
+                    
+                    # 更新订单状态
+                    self.db_manager.update_order_status(user_id, '交易关闭')
+                    logger.info(f"订单状态已更新: {user_id} -> 交易关闭")
+                    
+                    # 保存订单消息
+                    self.db_manager.save_order_message(
+                        order_id=user_id,  # 使用user_id作为order_id
+                        message='交易已关闭',
+                        user_url=user_url
+                    )
+                    logger.info(f"订单消息已保存: {user_id} -> 交易已关闭")
                     logger.info(f'卖家 {user_url} 交易关闭')
                     return
+                    
                 elif message['3']['redReminder'] == '等待卖家发货':
-                    user_id = message['1'].split('@')[0]
+                    user_id = message['1'].split('@')[0]  # 使用user_id作为order_id
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
+                    
+                    # 更新订单状态
+                    self.db_manager.update_order_status(user_id, '等待卖家发货')
+                    logger.info(f"订单状态已更新: {user_id} -> 等待卖家发货")
+                    
+                    # 保存订单消息
+                    self.db_manager.save_order_message(
+                        order_id=user_id,  # 使用user_id作为order_id
+                        message='买家已付款，等待卖家发货',
+                        user_url=user_url
+                    )
+                    logger.info(f"订单消息已保存: {user_id} -> 买家已付款，等待卖家发货")
                     logger.info(f'交易成功 {user_url} 等待卖家发货')
                     return
 
-            except:
+            except Exception as e:
+                logger.error(f"处理订单消息时发生错误: {str(e)}")
                 pass
 
             # 判断消息类型
@@ -225,7 +268,6 @@ class XianyuLive:
                 logger.debug(f"原始消息: {message}")
                 return
 
-            print(memoryview)
             # 处理聊天消息
             create_time = int(message["1"]["5"])
             send_user_name = message["1"]["10"]["reminderTitle"]
@@ -278,7 +320,8 @@ class XianyuLive:
             # 生成回复
             bot_reply = bot.generate(
                 user_msg=send_message,
-                user_id=send_user_id
+                user_id=send_user_id,
+                order_id=order_id
             )
             
             # 保存机器人回复到数据库
@@ -358,6 +401,37 @@ class XianyuLive:
             logger.error(f"处理心跳响应出错: {e}")
         return False
 
+    async def process_message(self, message_data, websocket):
+        """处理单个消息的协程"""
+        try:
+            await self.handle_message(message_data, websocket)
+        except Exception as e:
+            logger.error(f"处理消息时发生错误: {str(e)}")
+        finally:
+            # 从处理任务集合中移除当前任务
+            self.processing_tasks.discard(asyncio.current_task())
+
+    async def message_processor(self):
+        """消息处理循环"""
+        while True:
+            try:
+                # 从队列中获取消息
+                message_data, websocket = await self.message_queue.get()
+                
+                # 创建新的处理任务
+                task = asyncio.create_task(self.process_message(message_data, websocket))
+                self.processing_tasks.add(task)
+                
+                # 设置回调以在任务完成时从集合中移除
+                task.add_done_callback(self.processing_tasks.discard)
+                
+                # 标记任务为已完成
+                self.message_queue.task_done()
+                
+            except Exception as e:
+                logger.error(f"消息处理器发生错误: {str(e)}")
+                await asyncio.sleep(1)  # 发生错误时短暂等待
+
     async def main(self):
         while True:
             try:
@@ -384,6 +458,9 @@ class XianyuLive:
                     # 启动心跳任务
                     self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
                     
+                    # 启动消息处理器
+                    processor_task = asyncio.create_task(self.message_processor())
+                    
                     async for message in websocket:
                         try:
                             message_data = json.loads(message)
@@ -407,8 +484,11 @@ class XianyuLive:
                                         ack["headers"][key] = message_data["headers"][key]
                                 await websocket.send(json.dumps(ack))
                             
-                            # 处理其他消息
-                            await self.handle_message(message_data, websocket)
+                            # 将消息放入队列
+                            try:
+                                await self.message_queue.put((message_data, websocket))
+                            except asyncio.QueueFull:
+                                logger.warning("消息队列已满，丢弃消息")
                                 
                         except json.JSONDecodeError:
                             logger.error("消息解析失败")
@@ -424,6 +504,12 @@ class XianyuLive:
                         await self.heartbeat_task
                     except asyncio.CancelledError:
                         pass
+                if processor_task:
+                    processor_task.cancel()
+                    try:
+                        await processor_task
+                    except asyncio.CancelledError:
+                        pass
                 await asyncio.sleep(5)  # 等待5秒后重连
                 
             except Exception as e:
@@ -432,6 +518,12 @@ class XianyuLive:
                     self.heartbeat_task.cancel()
                     try:
                         await self.heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                if processor_task:
+                    processor_task.cancel()
+                    try:
+                        await processor_task
                     except asyncio.CancelledError:
                         pass
                 await asyncio.sleep(5)  # 等待5秒后重连

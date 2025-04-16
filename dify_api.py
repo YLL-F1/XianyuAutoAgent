@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
-def send_message_to_dify(api_key, query, conversation_id="", user_id="abc-123", image_url=None):
+def send_message_to_dify(api_key, query, conversation_id="", user_id="abc-123", image_url=None, order_id=None):
     """
     向 Dify.ai API 发送消息
     
@@ -16,6 +16,7 @@ def send_message_to_dify(api_key, query, conversation_id="", user_id="abc-123", 
         conversation_id (str, 可选): 会话ID，默认为空字符串
         user_id (str, 可选): 用户ID，默认为 "abc-123"
         image_url (str, 可选): 要包含的图片URL，默认为 None
+        order_id (str, 可选): 订单ID，默认为 None
     
     返回:
         API 的响应对象
@@ -29,11 +30,20 @@ def send_message_to_dify(api_key, query, conversation_id="", user_id="abc-123", 
     
     # 准备请求数据
     payload = {
-        "inputs": {},
+        "inputs": {
+            "order_id": order_id
+        },
         "query": query,
         "response_mode": "blocking",
         "conversation_id": conversation_id,
-        "user": user_id
+        "user": user_id,
+        "files": [
+            {
+                "type": "image",
+                "transfer_method": "remote_url",
+                "url": "https://cloud.dify.ai/logo/logo-site.png"
+            }
+        ]
     }
     
     # 如果提供了图片URL，添加到请求中
@@ -68,7 +78,8 @@ if __name__ == "__main__":
     response = send_message_to_dify(
         api_key=API_KEY,
         query=query,
-        image_url=image_url
+        image_url=image_url,
+        order_id="1234567890"
     )
     
     # 打印响应

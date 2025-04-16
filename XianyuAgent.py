@@ -26,7 +26,7 @@ class DifyAgent():
         if not self.api_key:
             raise ValueError("请在.env文件中设置DIFY_API_KEY环境变量")
     
-    def generate(self, user_msg: str, user_id: str, image_url: str = None) -> str:
+    def generate(self, user_msg: str, user_id: str, image_url: str = None, order_id: str = None) -> str:
         """重写生成逻辑，使用 Dify API"""
         url = "https://api.dify.ai/v1/chat-messages"
         
@@ -37,7 +37,9 @@ class DifyAgent():
         
         # 准备请求数据
         payload = {
-            "inputs": {},
+            "inputs": {
+                "order_id": order_id if order_id else ""
+            },
             "query": user_msg,
             "response_mode": "blocking",
             "conversation_id": "",

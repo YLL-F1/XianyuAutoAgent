@@ -31,6 +31,7 @@ class XianyuMySQLManager:
             self.conn = mysql.connector.connect(**config)
             self.cursor = self.conn.cursor(dictionary=True)
             self._create_tables()
+            self._update_tables_charset()  # 更新现有表的字符集
             logger.info(f"成功连接到MySQL数据库: {host}:{port}")
         except mysql.connector.Error as err:
             logger.error(f"连接MySQL数据库失败: {err}")
@@ -63,7 +64,9 @@ class XianyuMySQLManager:
                 CREATE TABLE IF NOT EXISTS order_message (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     order_id VARCHAR(255) NOT NULL,
-                    message TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    message TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+                    time VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+                    user_url TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
@@ -72,7 +75,8 @@ class XianyuMySQLManager:
                 CREATE TABLE IF NOT EXISTS order_status (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     order_id VARCHAR(255) NOT NULL,
-                    status VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                    status VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+                    time VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
@@ -81,6 +85,27 @@ class XianyuMySQLManager:
         except Exception as e:
             logger.error(f"创建MySQL数据库表时发生错误: {str(e)}")
             raise
+            
+    def _update_tables_charset(self):
+        """更新现有表的字符集为UTF-8"""
+        try:
+            # 更新order_status表
+            self.cursor.execute('''
+                ALTER TABLE order_status 
+                MODIFY COLUMN status VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            ''')
+            
+            # 更新order_message表
+            self.cursor.execute('''
+                ALTER TABLE order_message 
+                MODIFY COLUMN message TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            ''')
+            
+            self.conn.commit()
+            logger.info("成功更新表字符集为UTF-8")
+        except Exception as e:
+            logger.error(f"更新表字符集时发生错误: {str(e)}")
+            # 不抛出异常，因为表可能还不存在
             
     def save_chat_message(self, user_id, user_name, local_id, chat, url=None, order_id=None):
         """保存聊天消息"""
@@ -106,13 +131,19 @@ class XianyuMySQLManager:
             logger.error(f"保存聊天消息时发生错误: {str(e)}")
             raise
             
-    def save_order_message(self, order_id, message):
-        """保存订单消息"""
+    def save_order_message(self, order_id, message, user_url=None):
+        """保存订单消息
+        Args:
+            order_id: 订单ID
+            message: 消息内容
+            user_url: 用户URL，可选
+        """
         try:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.cursor.execute('''
-                INSERT INTO order_message (order_id, message)
-                VALUES (%s, %s)
-            ''', (order_id, message))
+                INSERT INTO order_message (order_id, message, time, user_url)
+                VALUES (%s, %s, %s, %s)
+            ''', (order_id, message, current_time, user_url))
             self.conn.commit()
             return self.cursor.lastrowid
         except Exception as e:
@@ -120,12 +151,34 @@ class XianyuMySQLManager:
             raise
             
     def update_order_status(self, order_id, status):
-        """更新订单状态"""
+        """更新订单状态
+        Args:
+            order_id: 订单ID
+            status: 订单状态
+        """
         try:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            
+            # 检查订单ID是否存在
             self.cursor.execute('''
-                INSERT INTO order_status (order_id, status)
-                VALUES (%s, %s)
-            ''', (order_id, status))
+                SELECT id FROM order_status WHERE order_id = %s
+            ''', (order_id,))
+            result = self.cursor.fetchone()
+            
+            if result:
+                # 如果订单ID存在，更新状态
+                self.cursor.execute('''
+                    UPDATE order_status 
+                    SET status = %s, time = %s 
+                    WHERE order_id = %s
+                ''', (status, current_time, order_id))
+            else:
+                # 如果订单ID不存在，插入新记录
+                self.cursor.execute('''
+                    INSERT INTO order_status (order_id, status, time)
+                    VALUES (%s, %s, %s)
+                ''', (order_id, status, current_time))
+                
             self.conn.commit()
             return self.cursor.lastrowid
         except Exception as e:
