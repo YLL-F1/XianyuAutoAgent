@@ -6,7 +6,6 @@ import os
 import websockets
 import redis
 import threading
-import ssl
 from loguru import logger
 from dotenv import load_dotenv
 from XianyuApis import XianyuApis
@@ -483,79 +482,13 @@ class XianyuLive:
             logger.error(f"处理心跳响应出错: {e}")
         return False
 
-    async def connect(self):
-        """建立WebSocket连接"""
-        try:
-            # 添加SSL上下文配置
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            # 添加连接超时和重试逻辑
-            for attempt in range(3):  # 最多重试3次
-                try:
-                    self.ws = await websockets.connect(
-                        self.base_url,
-                        ssl=ssl_context,
-                        ping_interval=20,  # 每20秒发送一次ping
-                        ping_timeout=10,   # ping超时时间为10秒
-                        close_timeout=5,   # 关闭超时时间为5秒
-                        max_size=2**20     # 最大消息大小为1MB
-                    )
-                    logger.info("WebSocket连接成功")
-                    return
-                except (websockets.exceptions.InvalidStatusCode,
-                       websockets.exceptions.InvalidHandshake,
-                       websockets.exceptions.InvalidMessage,
-                       websockets.exceptions.ConnectionClosed,
-                       ssl.SSLError,
-                       OSError) as e:
-                    if attempt < 2:  # 如果不是最后一次尝试
-                        wait_time = (attempt + 1) * 5  # 递增等待时间
-                        logger.warning(f"WebSocket连接失败，{wait_time}秒后重试: {str(e)}")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        raise
-        except Exception as e:
-            logger.error(f"WebSocket连接失败: {str(e)}")
-            raise
-
-    async def handle_message(self, message):
-        """处理接收到的消息"""
-        try:
-            # 将消息放入Redis队列
-            message_data = {
-                'message': message,
-                'timestamp': time.time()
-            }
-            self.redis_client.rpush(self.message_queue_key, json.dumps(message_data))
-            logger.debug(f"消息已加入队列: {message}")
-        except Exception as e:
-            logger.error(f"处理消息时发生错误: {str(e)}")
-            # 如果Redis操作失败，尝试重新连接
-            try:
-                self.redis_client = redis.Redis(
-                    host='localhost',
-                    port=6379,
-                    db=0,
-                    socket_timeout=5,
-                    socket_connect_timeout=5,
-                    retry_on_timeout=True
-                )
-                # 重试一次
-                self.redis_client.rpush(self.message_queue_key, json.dumps(message_data))
-            except Exception as retry_error:
-                logger.error(f"重试Redis操作失败: {str(retry_error)}")
-
     async def main(self):
-        """主函数"""
+        # 启动工作线程
+        self.start_workers()
+        
         try:
-            # 启动工作线程
-            self.start_workers()
-            
             while True:
                 try:
-                    # 建立WebSocket连接
                     headers = {
                         "Cookie": self.cookies_str,
                         "Host": "wss-goofish.dingtalk.com",
@@ -620,6 +553,7 @@ class XianyuLive:
                         except asyncio.CancelledError:
                             pass
                     await asyncio.sleep(5)  # 等待5秒后重连
+                    
                 except Exception as e:
                     logger.error(f"连接发生错误: {e}")
                     if self.heartbeat_task:
@@ -629,14 +563,9 @@ class XianyuLive:
                         except asyncio.CancelledError:
                             pass
                     await asyncio.sleep(5)  # 等待5秒后重连
-                    
-        except Exception as e:
-            logger.error(f"主循环发生错误: {str(e)}")
         finally:
             # 确保在程序退出时停止工作线程
             self.stop_workers()
-            if hasattr(self, 'ws') and self.ws:
-                await self.ws.close()
 
 if __name__ == '__main__':
     #加载环境变量 cookie
