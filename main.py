@@ -106,6 +106,17 @@ class XianyuLive:
     async def handle_message(self, message_data, websocket):
         """将消息放入Redis队列"""
         try:
+            # 检查是否为同步包消息
+            if not self.is_sync_package(message_data):
+                return
+
+            # 获取并解密数据
+            sync_data = message_data["body"]["syncPushPackage"]["data"][0]
+            
+            # 检查是否有必要的字段
+            if "data" not in sync_data:
+                return
+
             # 将消息数据序列化并放入Redis队列
             data = {
                 'message': message_data,
@@ -119,6 +130,7 @@ class XianyuLive:
     async def _handle_message(self, message_data, websocket):
         """实际处理消息的方法"""
         try:
+            # 发送通用ACK响应
             try:
                 message = message_data
                 ack = {

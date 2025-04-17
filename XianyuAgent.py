@@ -62,6 +62,9 @@ class DifyAgent():
             
             if response.status_code == 200:
                 answer = response.json().get('answer', '')
+                # 如果answer为空，直接返回
+                if not answer:
+                    return "抱歉，我现在无法回答您的问题，请稍后再试。"
                 return self.safety_filter(answer)
             else:
                 logger.error(f"Dify API 请求失败: {response.status_code} - {response.text}")

@@ -69,7 +69,7 @@ if __name__ == "__main__":
         raise ValueError("请在.env文件中设置DIFY_API_KEY环境变量")
     
     # 示例查询
-    query = "iPhone 13 Pro Max的规格是什么？"
+    query = "2"
     
     # 示例图片URL
     image_url = "https://cloud.dify.ai/logo/logo-site.png"
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         api_key=API_KEY,
         query=query,
         image_url=image_url,
-        order_id="1234567890"
+        order_id="48920775354"
     )
     
     # 打印响应
