@@ -32,6 +32,8 @@ class XianyuLive:
         )
         self.message_queue_key = 'xianyu:messages'
         self.processing_queue_key = 'xianyu:processing'
+        self.chat_messages_key = 'xianyu:chat_messages'  # 新增：存储聊天消息的Redis键
+        self.order_first_message_time = {}  # 记录每个order_id的首次消息时间
         
         # 线程相关配置
         self.max_workers = 10  # 最大工作线程数
@@ -45,6 +47,13 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.heartbeat_task = None
         self.ws = None
+        
+        #启动定时处理线程
+        self.batch_process_thread = threading.Thread(
+            target=self.batch_process_messages,
+            daemon=True
+        )
+        self.batch_process_thread.start()
 
     def start_workers(self):
         """启动工作线程"""
@@ -252,74 +261,38 @@ class XianyuLive:
             send_user_name = message["1"]["10"]["reminderTitle"]
             send_user_id = message["1"]["10"]["senderUserId"]
             send_message = message["1"]["10"]["reminderContent"]
-            order_id = message["1"]["2"].split('@')[0]  # 获取订单ID
+            order_id = message["1"]["2"].split('@')[0]
+            url_info = message["1"]["10"]["reminderUrl"]
             
             # 时效性验证（过滤5分钟前消息）
             if (time.time() * 1000 - create_time) > 300000:
                 logger.debug("过期消息丢弃")
                 return
-                
-            #if send_user_id == self.myid:
-            #    logger.debug("过滤自身消息")
-            #    return
-                
-            url_info = message["1"]["10"]["reminderUrl"]
-            item_id = url_info.split("itemId=")[1].split("&")[0] if "itemId=" in url_info else None
             
-            if not item_id:
-                logger.warning("无法获取商品ID")
-                return
-                
-            item_info = self.xianyu.get_item_info(self.cookies, item_id)['data']['itemDO']
-            item_description = f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
-            item_image_url = item_info.get('images', [{}])[0].get('url') if item_info.get('images') else None
+            # 构造消息数据
+            chat_data = {
+                'user_id': send_user_id,
+                'user_name': send_user_name,
+                'local_id': self.myid,
+                'chat': send_message,
+                'url': url_info,
+                'order_id': order_id,
+                'timestamp': time.time()
+            }
             
-            # 保存聊天消息到数据库
-            try:
-                self.db_manager.save_chat_message(
-                    user_id=send_user_id,  # 使用发送者ID
-                    user_name=send_user_name,
-                    local_id=self.myid,  # 使用机器人ID作为local_id
-                    chat=send_message,
-                    url=url_info,  # 保存完整的URL信息
-                    order_id=order_id  # 保存订单ID
-                )
-                logger.info(f"已保存聊天消息到数据库: {send_user_name} - {send_message}")
-            except Exception as e:
-                logger.error(f"保存聊天消息到数据库时发生错误: {str(e)}")
+            # 记录首次消息时间
+            if order_id not in self.order_first_message_time:
+                self.order_first_message_time[order_id] = time.time()
             
-            logger.info(f"user: {send_user_name}, 发送消息: {send_message}")
-            
-            # 添加用户消息到上下文
-            #self.context_manager.add_message(send_user_id, item_id, "user", send_message)
-            
-            # 获取完整的对话上下文
-            #context = self.context_manager.get_context(send_user_id, item_id)
-            
-            # 生成回复
-            bot_reply = bot.generate(
-                user_msg=send_message,
-                user_id=send_user_id,
-                order_id=order_id
+            # 将消息添加到对应order_id的列表中
+            self.redis_client.lpush(
+                f"{self.chat_messages_key}:{order_id}",
+                json.dumps(chat_data)
             )
+            # 设置24小时过期
+            self.redis_client.expire(f"{self.chat_messages_key}:{order_id}", 86400)
             
-            # 保存机器人回复到数据库
-            try:
-                self.db_manager.save_chat_message(
-                    user_id=send_user_id,  # 使用发送者ID
-                    user_name="me",  # 机器人名称
-                    local_id=self.myid,  # 使用机器人ID作为local_id
-                    chat=bot_reply,
-                    url=url_info,  # 保存相同的URL信息
-                    order_id=order_id  # 保存相同的订单ID
-                )
-                logger.info(f"已保存机器人回复到数据库: {bot_reply}")
-            except Exception as e:
-                logger.error(f"保存机器人回复到数据库时发生错误: {str(e)}")
-            
-            logger.info(f"机器人回复: {bot_reply}")
-            cid = message["1"]["2"].split('@')[0]
-            await self.send_msg(websocket, cid, send_user_id, bot_reply)
+            logger.info(f"已将消息存入Redis - order_id: {order_id}, message: {send_message}")
             
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
@@ -578,6 +551,114 @@ class XianyuLive:
         finally:
             # 确保在程序退出时停止工作线程
             self.stop_workers()
+
+    def batch_process_messages(self):
+        """处理达到5秒时间阈值的order_id消息"""
+        while True:
+            try:
+                current_time = time.time()
+                
+                # 获取所有活跃的order_id
+                pattern = f"{self.chat_messages_key}:*"
+                order_keys = self.redis_client.keys(pattern)
+                
+                for order_key in order_keys:
+                    try:
+                        order_id = order_key.split(':')[2]
+                        
+                        # 检查是否已经过了5秒
+                        first_message_time = self.order_first_message_time.get(order_id)
+                        if not first_message_time or (current_time - first_message_time) < 5:
+                            continue  # 跳过未到5秒的order_id
+                            
+                        # 获取Redis中该order_id的所有消息
+                        messages = []
+                        while True:
+                            msg_data = self.redis_client.rpop(order_key)
+                            if not msg_data:
+                                break
+                            messages.append(json.loads(msg_data))
+                        
+                        if not messages:
+                            # 清理首次消息时间记录
+                            self.order_first_message_time.pop(order_id, None)
+                            continue
+                            
+                        # 按时间排序
+                        messages.sort(key=lambda x: x['timestamp'])
+                        
+                        # 获取MySQL中最近5条历史消息
+                        history_messages = self.db_manager.get_chat_messages(
+                            order_id=order_id,
+                            limit=5
+                        )
+                        
+                        # 构建完整对话上下文
+                        context = []
+                        
+                        # 添加历史消息
+                        for msg in history_messages:
+                            context.append(f"{msg['user_name']}: {msg['chat']}")
+                        
+                        # 添加Redis中的新消息
+                        for msg in messages:
+                            context.append(f"{msg['user_name']}: {msg['chat']}")
+                        
+                        # 合并上下文
+                        full_context = "\n".join(context)
+                        
+                        # 生成回复
+                        bot_reply = bot.generate(
+                            user_msg=full_context,
+                            user_id=messages[-1]['user_id'],
+                            order_id=order_id
+                        )
+                        
+                        # 保存所有新消息到MySQL
+                        for msg in messages:
+                            self.db_manager.save_chat_message(
+                                user_id=msg['user_id'],
+                                user_name=msg['user_name'],
+                                local_id=msg['local_id'],
+                                chat=msg['chat'],
+                                url=msg['url'],
+                                order_id=msg['order_id']
+                            )
+                        
+                        # 保存机器人回复到MySQL
+                        self.db_manager.save_chat_message(
+                            user_id=messages[-1]['user_id'],
+                            user_name="me",
+                            local_id=self.myid,
+                            chat=bot_reply,
+                            url=messages[-1]['url'],
+                            order_id=order_id
+                        )
+                        
+                        # 发送回复
+                        asyncio.run(self.send_msg(
+                            self.ws,
+                            order_id,
+                            messages[-1]['user_id'],
+                            bot_reply
+                        ))
+                        
+                        logger.info(f"批量处理完成 - order_id: {order_id}, reply: {bot_reply}")
+                        
+                        # 清理已处理的order_id的首次消息时间
+                        self.order_first_message_time.pop(order_id, None)
+                        
+                    except Exception as e:
+                        logger.error(f"处理order_id {order_id}的消息时出错: {str(e)}")
+                        # 出错时也清理首次消息时间，避免消息卡住
+                        self.order_first_message_time.pop(order_id, None)
+                
+                # 短暂休眠以减少CPU使用
+                time.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"批量处理消息时发生错误: {str(e)}")
+                time.sleep(0.1)
 
 if __name__ == '__main__':
     #加载环境变量 cookie
