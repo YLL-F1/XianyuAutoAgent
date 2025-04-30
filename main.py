@@ -55,6 +55,13 @@ class XianyuLive:
         )
         self.batch_process_thread.start()
 
+        # 新增：每10秒轮询 Redis，处理订单
+        self.order_wait_ship_thread = threading.Thread(
+            target=self.process_wait_ship_orders,
+            daemon=True
+        )
+        self.order_wait_ship_thread.start()
+
     def start_workers(self):
         """启动工作线程"""
         for i in range(self.max_workers):
@@ -241,6 +248,9 @@ class XianyuLive:
                     )
                     logger.info(f"订单消息已保存: {user_id} -> 买家已付款，等待卖家发货")
                     logger.info(f'交易成功 {user_url} 等待卖家发货')
+
+                    # 新增：把订单信息存入Redis，设置10秒过期
+                    self.redis_client.setex(f"xianyu:order_wait_ship:{user_id}", 10, "wait_ship")
                     return
 
             except Exception as e:
@@ -267,6 +277,10 @@ class XianyuLive:
             # 时效性验证（过滤5分钟前消息）
             if (time.time() * 1000 - create_time) > 300000:
                 logger.debug("过期消息丢弃")
+                return
+            
+            if send_user_id == self.myid:
+                logger.debug("过滤自身消息")
                 return
             
             # 构造消息数据
@@ -659,6 +673,65 @@ class XianyuLive:
             except Exception as e:
                 logger.error(f"批量处理消息时发生错误: {str(e)}")
                 time.sleep(0.1)
+
+    def process_wait_ship_orders(self):
+        """每10秒检测是否有等待卖家发货的订单，并进行回复"""
+        while True:
+            try:
+                # 查找所有等待卖家发货的订单
+                keys = self.redis_client.keys("xianyu:order_wait_ship:*")
+                for key in keys:
+                    order_id = key.split(":")[-1]
+                    # 检查key是否还存在（防止被其他线程消费）
+                    if not self.redis_client.exists(key):
+                        continue
+
+                    # 从数据库 chat_message 检索 user_id 和 local_id
+                    # 取最新一条消息
+                    chat_msgs = self.db_manager.get_chat_messages(order_id=order_id, limit=1)
+                    if not chat_msgs:
+                        logger.warning(f"未找到order_id={order_id}的聊天消息，无法自动回复")
+                        self.redis_client.delete(key)
+                        continue
+
+                    msg = chat_msgs[0]
+                    user_id = msg['user_id'] if isinstance(msg, dict) else msg[1]
+                    local_id = msg['local_id'] if isinstance(msg, dict) else msg[3]
+
+                    # 生成回复
+                    reply = bot.generate(
+                        user_msg="您的订单已付款，卖家会尽快发货，请耐心等待。",
+                        user_id=user_id,
+                        order_id=order_id
+                    )
+
+                    # 保存机器人回复到MySQL
+                    self.db_manager.save_chat_message(
+                        user_id=user_id,
+                        user_name="me",
+                        local_id=local_id,
+                        chat=reply,
+                        url=None,
+                        order_id=order_id
+                    )
+
+                    # 发送消息
+                    asyncio.run(self.send_msg(
+                        self.ws,
+                        order_id,
+                        user_id,
+                        reply
+                    ))
+
+                    logger.info(f"已自动回复等待卖家发货订单: {order_id}")
+
+                    # 删除已处理的key
+                    self.redis_client.delete(key)
+
+                time.sleep(10)
+            except Exception as e:
+                logger.error(f"处理等待卖家发货订单时出错: {str(e)}")
+                time.sleep(10)
 
 if __name__ == '__main__':
     #加载环境变量 cookie
