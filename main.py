@@ -272,28 +272,52 @@ class XianyuLive:
             create_time = int(message["1"]["5"])
             send_user_name = message["1"]["10"]["reminderTitle"]
             send_user_id = message["1"]["10"]["senderUserId"]
-            send_message = message["1"]["10"]["reminderContent"]
             order_id = message["1"]["2"].split('@')[0]
             url_info = message["1"]["10"]["reminderUrl"]
-            
+
+            # 判断消息类型和内容
+            chat_type = 'text'  # 默认为文本类型
+            chat_content = message["1"]["10"]["reminderContent"]  # 默认为提醒内容
+
+            # 检查消息类型
+            if "6" in message["1"] and isinstance(message["1"]["6"], dict):
+                msg_type = message["1"]["6"].get("1")
+                if msg_type == 101:  # 系统消息
+                    msg_content = message["1"]["6"].get("3", {})
+                    if isinstance(msg_content, dict):
+                        content_type = msg_content.get("4")
+                        if content_type == 2:  # 图片消息
+                            chat_type = 'image'
+                            # 从图片数据中提取URL
+                            try:
+                                image_data = json.loads(msg_content.get("5", "{}"))
+                                if "image" in image_data and "pics" in image_data["image"]:
+                                    pics = image_data["image"]["pics"]
+                                    if pics and len(pics) > 0:
+                                        chat_content = pics[0].get("url", "")
+                            except Exception as e:
+                                logger.error(f"解析图片数据失败: {e}")
+                                chat_content = "[图片解析失败]"
+
             # 时效性验证（过滤5分钟前消息）
             if (time.time() * 1000 - create_time) > 300000:
                 logger.debug("过期消息丢弃")
                 return
-            
-            if send_user_id == self.myid:
-                logger.debug("过滤自身消息")
-                return
-            
+
+            # if send_user_id == self.myid:
+            #     logger.debug("过滤自身消息")
+            #     return
+
             # 构造消息数据
             chat_data = {
                 'user_id': send_user_id,
                 'user_name': send_user_name,
                 'local_id': self.myid,
-                'chat': send_message,
+                'chat': chat_content,
                 'url': url_info,
                 'order_id': order_id,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'chat_type': chat_type
             }
             
             # 记录首次消息时间
@@ -308,7 +332,7 @@ class XianyuLive:
             # 设置24小时过期
             self.redis_client.expire(f"{self.chat_messages_key}:{order_id}", 86400)
             
-            logger.info(f"已将消息存入Redis - order_id: {order_id}, message: {send_message}")
+            logger.info(f"已将消息存入Redis - order_id: {order_id}, message: {chat_content}")
             
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
@@ -561,8 +585,7 @@ class XianyuLive:
                             await self.heartbeat_task
                         except asyncio.CancelledError:
                             pass
-                    logger.error("连接发生错误，正在重启程序...")
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    await asyncio.sleep(5)  # 等待5秒后重连
                     
                 except Exception as e:
                     logger.error(f"连接发生错误: {e}")
@@ -572,8 +595,7 @@ class XianyuLive:
                             await self.heartbeat_task
                         except asyncio.CancelledError:
                             pass
-                    logger.error("连接发生错误，正在重启程序...")
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    await asyncio.sleep(5)  # 等待5秒后重连
         finally:
             # 确保在程序退出时停止工作线程
             self.stop_workers()
@@ -648,7 +670,8 @@ class XianyuLive:
                                 local_id=msg['local_id'],
                                 chat=msg['chat'],
                                 url=msg['url'],
-                                order_id=msg['order_id']
+                                order_id=msg['order_id'],
+                                chat_type=msg.get('chat_type', 'text')
                             )
                         
                         # 保存机器人回复到MySQL
@@ -658,7 +681,8 @@ class XianyuLive:
                             local_id=self.myid,
                             chat=bot_reply,
                             url=messages[-1]['url'],
-                            order_id=order_id
+                            order_id=order_id,
+                            chat_type='text'
                         )
                         
                         # 发送回复
@@ -724,7 +748,8 @@ class XianyuLive:
                         local_id=local_id,
                         chat=reply,
                         url=None,
-                        order_id=order_id
+                        order_id=order_id,
+                        chat_type='text'
                     )
 
                     # 发送消息
