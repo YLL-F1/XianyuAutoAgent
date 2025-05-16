@@ -262,6 +262,11 @@ class XianyuLive:
                 logger.debug("其他非聊天消息")
                 logger.debug(f"原始消息: {message}")
                 return
+            elif message['1']['7'] == 1:
+                logger.debug("系统消息")
+                return
+            else:
+                logger.debug("聊天消息")
 
             # 处理聊天消息
             create_time = int(message["1"]["5"])
@@ -556,7 +561,8 @@ class XianyuLive:
                             await self.heartbeat_task
                         except asyncio.CancelledError:
                             pass
-                    await asyncio.sleep(5)  # 等待5秒后重连
+                    logger.error("连接发生错误，正在重启程序...")
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
                     
                 except Exception as e:
                     logger.error(f"连接发生错误: {e}")
@@ -566,7 +572,8 @@ class XianyuLive:
                             await self.heartbeat_task
                         except asyncio.CancelledError:
                             pass
-                    await asyncio.sleep(5)  # 等待5秒后重连
+                    logger.error("连接发生错误，正在重启程序...")
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
         finally:
             # 确保在程序退出时停止工作线程
             self.stop_workers()

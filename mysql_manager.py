@@ -61,7 +61,8 @@ class XianyuMySQLManager:
                     chat TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
                     time VARCHAR(255),
                     url TEXT,
-                    order_id VARCHAR(255)
+                    order_id VARCHAR(255),
+                    chat_type VARCHAR(50) DEFAULT 'text'  -- 新增字段，默认为文本类型
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             ''')
             
@@ -113,8 +114,17 @@ class XianyuMySQLManager:
             logger.error(f"更新表字符集时发生错误: {str(e)}")
             # 不抛出异常，因为表可能还不存在
             
-    def save_chat_message(self, user_id, user_name, local_id, chat, url=None, order_id=None):
-        """保存聊天消息"""
+    def save_chat_message(self, user_id, user_name, local_id, chat, url=None, order_id=None, chat_type='text'):
+        """保存聊天消息
+        Args:
+            user_id: 用户ID
+            user_name: 用户名
+            local_id: 本地ID
+            chat: 聊天内容
+            url: URL，可选
+            order_id: 订单ID，可选
+            chat_type: 消息类型，默认为'text'
+        """
         try:
             # 添加随机延迟
             self._random_delay()
@@ -131,9 +141,9 @@ class XianyuMySQLManager:
                 
             current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.cursor.execute('''
-                INSERT INTO chat_message (user_id, user_name, local_id, chat, time, url, order_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ''', (user_id, user_name, local_id, chat, current_time, url, order_id))
+                INSERT INTO chat_message (user_id, user_name, local_id, chat, time, url, order_id, chat_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (user_id, user_name, local_id, chat, current_time, url, order_id, chat_type))
             self.conn.commit()
             return self.cursor.lastrowid
         except Exception as e:
