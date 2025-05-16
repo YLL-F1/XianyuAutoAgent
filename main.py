@@ -6,13 +6,10 @@ import os
 import websockets
 import redis
 import threading
+import sys
 from loguru import logger
 from dotenv import load_dotenv
-from XianyuApis import XianyuApis
-from mysql_manager import XianyuMySQLManager
-from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
-from XianyuAgent import DifyAgent
-
+from cookie_fetcher import refresh_and_get_cookies
 class XianyuLive:
     def __init__(self, cookies_str):
         self.xianyu = XianyuApis()
@@ -359,29 +356,37 @@ class XianyuLive:
         await ws.send(json.dumps(msg))
 
     async def init(self, ws):
-        token = self.xianyu.get_token(self.cookies, self.device_id)['data']['accessToken']
-        msg = {
-            "lwp": "/reg",
-            "headers": {
-                "cache-header": "app-key token ua wv",
-                "app-key": "444e9908a51d1cb236a27862abc769c9",
-                "token": token,
-                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
-                "dt": "j",
-                "wv": "im:3,au:3,sy:6",
-                "sync": "0,0;0;0;",
-                "did": self.device_id,
-                "mid": generate_mid()
+        try:
+            token = self.xianyu.get_token(self.cookies, self.device_id)['data']['accessToken']
+            msg = {
+                "lwp": "/reg",
+                "headers": {
+                    "cache-header": "app-key token ua wv",
+                    "app-key": "444e9908a51d1cb236a27862abc769c9",
+                    "token": token,
+                    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
+                    "dt": "j",
+                    "wv": "im:3,au:3,sy:6",
+                    "sync": "0,0;0;0;",
+                    "did": self.device_id,
+                    "mid": generate_mid()
+                }
             }
-        }
-        await ws.send(json.dumps(msg))
-        # 等待一段时间，确保连接注册完成
-        await asyncio.sleep(1)
-        msg = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "5701741704675979 0"}, "body": [
-            {"pipeline": "sync", "tooLong2Tag": "PNM,1", "channel": "sync", "topic": "sync", "highPts": 0,
-             "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
-        await ws.send(json.dumps(msg))
-        logger.info('连接注册完成')
+            await ws.send(json.dumps(msg))
+            # 等待一段时间，确保连接注册完成
+            await asyncio.sleep(1)
+            msg = {"lwp": "/r/SyncStatus/ackDiff", "headers": {"mid": "5701741704675979 0"}, "body": [
+                {"pipeline": "sync", "tooLong2Tag": "PNM,1", "channel": "sync", "topic": "sync", "highPts": 0,
+                 "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
+            await ws.send(json.dumps(msg))
+            logger.info('连接注册完成')
+        except Exception as e:
+            if "'accessToken'" in str(e):
+                logger.error("accessToken 错误，正在重启程序...")
+                # 重启程序
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                raise e
 
     def is_chat_message(self, message):
         """判断是否为用户聊天消息"""
@@ -736,7 +741,11 @@ class XianyuLive:
 if __name__ == '__main__':
     #加载环境变量 cookie
     load_dotenv()
-    cookies_str = os.getenv("COOKIES_STR")
+    cookies_str = refresh_and_get_cookies()
+    from XianyuApis import XianyuApis
+    from mysql_manager import XianyuMySQLManager
+    from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
+    from XianyuAgent import DifyAgent
     bot = DifyAgent()
     xianyuLive = XianyuLive(cookies_str)
     # 常驻进程
