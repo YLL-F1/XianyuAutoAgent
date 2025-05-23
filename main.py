@@ -595,7 +595,8 @@ class XianyuLive:
                             await self.heartbeat_task
                         except asyncio.CancelledError:
                             pass
-                    await asyncio.sleep(5)  # 等待5秒后重连
+                    # 直接重启程序
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
         finally:
             # 确保在程序退出时停止工作线程
             self.stop_workers()
@@ -646,7 +647,7 @@ class XianyuLive:
                         
                         # 添加历史消息
                         for msg in history_messages:
-                            context.append(f"{msg['user_name']}: {msg['chat']}")
+                            context.append(f"[历史消息] {msg['user_name']}: {msg['chat']}")
                         
                         # 添加Redis中的新消息
                         for msg in messages:
@@ -654,6 +655,7 @@ class XianyuLive:
                         
                         # 合并上下文
                         full_context = "\n".join(context)
+                        print(full_context)
                         
                         # 生成回复
                         bot_reply = bot.generate(

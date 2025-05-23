@@ -28,7 +28,7 @@ class DifyAgent():
     
     def generate(self, user_msg: str, user_id: str, image_url: str = None, order_id: str = None) -> str:
         """重写生成逻辑，使用 Dify API"""
-        url = "https://api.dify.ai/v1/chat-messages"
+        url = "http://127.0.0.1/v1/chat-messages"
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",

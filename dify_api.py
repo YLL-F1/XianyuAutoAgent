@@ -21,7 +21,7 @@ def send_message_to_dify(api_key, query, conversation_id="", user_id="abc-123", 
     返回:
         API 的响应对象
     """
-    url = "https://api.dify.ai/v1/chat-messages"
+    url = "http://127.0.0.1/v1/chat-messages"
     
     headers = {
         "Authorization": f"Bearer {api_key}",
