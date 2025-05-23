@@ -48,6 +48,8 @@ class XianyuLive:
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
         self.db_manager = XianyuMySQLManager()  # 使用MySQL管理器
+        # 批量处理消息的时间阈值（秒）
+        self.message_batch_threshold = 5
         
         # Redis配置
         self.redis_client = redis.Redis(

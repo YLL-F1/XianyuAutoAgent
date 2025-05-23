@@ -76,10 +76,10 @@ def batch_process_messages(self):
                 try:
                     order_id = order_key.split(':')[2]
                     
-                    # 检查是否已经过了5秒
+                    # 检查是否已经过了阈值
                     first_message_time = self.order_first_message_time.get(order_id)
-                    if not first_message_time or (current_time - first_message_time) < 5:
-                        continue  # 跳过未到5秒的order_id
+                    if not first_message_time or (current_time - first_message_time) < self.message_batch_threshold:
+                        continue  # 跳过未到阈值的order_id
                         
                     # 获取Redis中该order_id的所有消息
                     messages = []
@@ -134,7 +134,11 @@ def batch_process_messages(self):
                             chat=msg['chat'],
                             url=msg['url'],
                             order_id=msg['order_id'],
-                            chat_type=msg.get('chat_type', 'text')
+                            chat_type=msg.get('chat_type', 'text'),
+                            city=msg.get('city', None),
+                            country=msg.get('country', None),
+                            platform=msg.get('platform', None),
+                            client_ip=msg.get('client_ip', None)
                         )
                     
                     # 保存机器人回复到MySQL
@@ -145,7 +149,11 @@ def batch_process_messages(self):
                         chat=bot_reply,
                         url=messages[-1]['url'],
                         order_id=order_id,
-                        chat_type='text'
+                        chat_type='text',
+                        city=messages[-1].get('city', None),
+                        country=messages[-1].get('country', None),
+                        platform=messages[-1].get('platform', None),
+                        client_ip=messages[-1].get('client_ip', None)
                     )
                     
                     # 发送回复

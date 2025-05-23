@@ -4,8 +4,24 @@ import time
 import os
 import sys
 import asyncio
+import requests
 from loguru import logger
 from utils.xianyu_utils import generate_mid, generate_uuid, decrypt
+
+def get_city_by_ip(ip):
+    # 通过 http://ip-api.com/json/{ip} 获取城市和国家
+    try:
+        if not ip:
+            return "", ""
+        url = f"http://ip-api.com/json/{ip}"
+        resp = requests.get(url, timeout=2)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "success":
+                return data.get("country", ""), data.get("regionName", "")
+    except Exception as e:
+        logger.error(f"IP归属地查询失败: {e}")
+    return "", ""
 
 async def handle_message(self, message_data, websocket):
     """将消息放入Redis队列"""
@@ -165,7 +181,9 @@ async def _handle_message(self, message_data, websocket):
         send_user_id = message["1"]["10"]["senderUserId"]
         order_id = message["1"]["2"].split('@')[0]
         url_info = message["1"]["10"]["reminderUrl"]
-
+        platform = message["1"]["10"].get("_platform", "")
+        client_ip = message["1"]["10"].get("clientIp", "")
+        country, city = get_city_by_ip(client_ip)
         # 判断消息类型和内容
         chat_type = 'text'  # 默认为文本类型
         chat_content = message["1"]["10"]["reminderContent"]  # 默认为提醒内容
@@ -208,7 +226,11 @@ async def _handle_message(self, message_data, websocket):
             'url': url_info,
             'order_id': order_id,
             'timestamp': time.time(),
-            'chat_type': chat_type
+            'chat_type': chat_type,
+            'platform': platform,
+            'client_ip': client_ip,
+            'city': city,
+            'country': country
         }
         
         # 记录首次消息时间
@@ -350,4 +372,21 @@ def is_typing_status(self, message):
             and "@goofish" in message["1"][0]["1"]
         )
     except Exception:
-        return False 
+        return False
+
+def save_chat_messages(self, messages):
+    """保存聊天消息"""
+    for msg in messages:
+        self.db_manager.save_chat_message(
+            user_id=msg['user_id'],
+            user_name=msg['user_name'],
+            local_id=msg['local_id'],
+            chat=msg['chat'],
+            url=msg['url'],
+            order_id=msg['order_id'],
+            chat_type=msg.get('chat_type', 'text'),
+            city=msg.get('city', None),
+            country=msg.get('country', None),
+            platform=msg.get('platform', None),
+            client_ip=msg.get('client_ip', None)
+        ) 
