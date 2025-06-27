@@ -5,6 +5,7 @@ import requests
 import json
 import time
 import browser_cookie3
+from pathlib import Path
 
 def check_remote_debugging_connection():
     """检查远程调试连接是否可用"""
@@ -38,14 +39,20 @@ def get_open_tabs():
 
 def get_goofish_cookies():
     """获取咸鱼(goofish.com)的Cookie并格式化"""
+    # 1. 设置你的 Chrome 自定义目录路径
+    chrome_data_dir = Path("/Users/dxm/ai_workflow/chrome-debug")
+
+    # 2. 自动构建关键文件路径
+    cookies_file = chrome_data_dir / "Default" / "Cookies"
+    key_file = chrome_data_dir / "Local State"  # 解密必需的密钥文件
     try:
-        domains = ["_goofish.com"]
+        domains = ["goofish.com"]
         cookies_dict = {}
         
         # 从每个域名获取cookie
         for domain in domains:
             try:
-                domain_cookies = browser_cookie3.chrome(domain_name=domain)
+                domain_cookies = browser_cookie3.chrome(cookie_file=str(cookies_file),domain_name=domain)
                 for cookie in domain_cookies:
                     cookies_dict[cookie.name] = cookie.value
             except Exception as e:

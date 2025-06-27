@@ -213,9 +213,9 @@ async def _handle_message(self, message_data, websocket):
             logger.debug("过期消息丢弃")
             return
 
-        # if send_user_id == self.myid:
-        #     logger.debug("过滤自身消息")
-        #     return
+        if send_user_id == self.myid:
+            logger.debug("过滤自身消息")
+            return
 
         # 构造消息数据
         chat_data = {
